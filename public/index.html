@@ -151,7 +151,7 @@
 
   <script>
     const API_BASE = '';
-    const INLINE_HASH_LIMIT = 1800; // if exceeded, store ciphertext server-side to shorten URL
+    const INLINE_HASH_LIMIT = 4096; // if exceeded, try server; otherwise stay inline
 
     const pad = document.getElementById('pad');
     const byteInfo = document.getElementById('byte-info');
@@ -167,6 +167,7 @@
     let updateTimer = null;
     let currentKey = null; // base64url encoded AES key stored in hash
     let lastRemote = { id: null, signature: null };
+    let remoteUnavailable = false;
 
     const base64urlEncode = (buf) => {
       const bytes = new Uint8Array(buf);
@@ -246,7 +247,7 @@
           saveState.textContent = 'Encrypted in URL';
           rawLink.href = './raw.html' + inlineHash;
           lastRemote = { id: null, signature: null };
-        } else {
+        } else if (!remoteUnavailable) {
           try {
             const id = await storeRemote({ cipher, iv, size });
             const shortHash = `#k=${currentKey}&id=${id}`;
@@ -254,11 +255,16 @@
             saveState.textContent = 'Encrypted on server (key in URL)';
             rawLink.href = './raw.html' + shortHash;
           } catch {
+            remoteUnavailable = true;
             if (location.hash !== inlineHash) history.replaceState(null, '', inlineHash);
             saveState.textContent = 'URL encrypted (long)';
             rawLink.href = './raw.html' + inlineHash;
-            warn.textContent = 'Server save failed; using long URL.';
+            warn.textContent = 'Server save failed; sticking to long URL this session.';
           }
+        } else {
+          if (location.hash !== inlineHash) history.replaceState(null, '', inlineHash);
+          saveState.textContent = 'URL encrypted (long)';
+          rawLink.href = './raw.html' + inlineHash;
         }
       } catch (e) {
         warn.textContent = 'Encryption/save failed.';
