@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PasteBox — client-side paste</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0c10;
+      --panel: #101118;
+      --accent: #5eead4;
+      --muted: #9ca3af;
+      --border: #1f2937;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: #e5e7eb;
+      font-family: "SFMono-Regular", ui-monospace, SFMono, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 12px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    header strong { color: #e5e7eb; }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.01);
+    }
+    textarea {
+      width: 100%;
+      height: 65vh;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: #e5e7eb;
+      font-size: 15px;
+      line-height: 1.6;
+      resize: vertical;
+    }
+    textarea::placeholder { color: #4b5563; }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      padding: 6px 2px;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .status { display: flex; gap: 10px; align-items: center; }
+    .btn {
+      border: 1px solid var(--border);
+      background: #111827;
+      color: #e5e7eb;
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn:hover { border-color: #334155; }
+    .accent { color: var(--accent); }
+    .error { color: #f87171; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .mono { font-family: inherit; }
+    .dropdown {
+      position: relative;
+      display: inline-block;
+    }
+    .menu {
+      position: absolute;
+      right: 0;
+      bottom: 110%;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px;
+      display: none;
+      min-width: 130px;
+      z-index: 10;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    }
+    .menu.open { display: block; }
+    .menu button {
+      width: 100%;
+      background: transparent;
+      border: none;
+      color: #e5e7eb;
+      text-align: left;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .menu button:hover { background: #111827; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>PasteBox</strong>
+    <span class="muted">client-side paste · URL carries your data · no server save</span>
+  </header>
+
+  <main>
+    <div class="panel">
+      <textarea id="pad" spellcheck="false" placeholder="Type or paste here; the URL updates automatically."></textarea>
+    </div>
+  </main>
+
+  <footer>
+    <div class="status">
+      <span id="byte-info">0 / 2 MB</span>
+      <span id="save-state" class="accent">Unsaved</span>
+      <span id="warn" class="error"></span>
+    </div>
+    <div class="status">
+      <button class="btn" id="copy-link">Copy link</button>
+      <div class="dropdown">
+        <button class="btn" id="save-btn">Save as ▾</button>
+        <div class="menu" id="save-menu">
+          <button data-format="txt">Plain text (.txt)</button>
+          <button data-format="md">Markdown (.md)</button>
+          <button data-format="html">HTML (.html)</button>
+          <button data-format="json">JSON (.json)</button>
+        </div>
+      </div>
+      <button class="btn" id="clear">Clear</button>
+      <a id="raw-link" class="mono" href="#">raw</a>
+    </div>
+  </footer>
+
+  <script>
+    const pad = document.getElementById('pad');
+    const byteInfo = document.getElementById('byte-info');
+    const saveState = document.getElementById('save-state');
+    const warn = document.getElementById('warn');
+    const copyBtn = document.getElementById('copy-link');
+    const saveBtn = document.getElementById('save-btn');
+    const saveMenu = document.getElementById('save-menu');
+    const clearBtn = document.getElementById('clear');
+    const rawLink = document.getElementById('raw-link');
+
+    const MAX_BYTES = 2 * 1024 * 1024;
+    let updateTimer = null;
+
+    const toBase64 = (str) => {
+      const bytes = new TextEncoder().encode(str);
+      let binary = '';
+      bytes.forEach(b => { binary += String.fromCharCode(b); });
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
+    };
+
+    const fromBase64 = (b64) => {
+      const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    };
+
+    const updateHash = () => {
+      const text = pad.value;
+      const size = new Blob([text]).size;
+      byteInfo.textContent = `${(size / (1024 * 1024)).toFixed(2)} / 2 MB`;
+      if (size > MAX_BYTES) {
+        warn.textContent = 'Too large (max 2MB).';
+        saveState.textContent = 'Not saved';
+        return;
+      }
+      warn.textContent = '';
+      const encoded = toBase64(text);
+      const newHash = '#p=' + encoded;
+      if (location.hash !== newHash) {
+        history.replaceState(null, '', newHash);
+      }
+      saveState.textContent = 'Saved to URL';
+      rawLink.href = './raw.html' + newHash;
+    };
+
+    const decodeFromHash = () => {
+      const hash = location.hash;
+      if (!hash.startsWith('#p=')) return '';
+      try {
+        const encoded = hash.slice(3);
+        return fromBase64(encoded);
+      } catch (e) {
+        warn.textContent = 'Failed to read paste from URL.';
+        return '';
+      }
+    };
+
+    const scheduleSave = () => {
+      saveState.textContent = 'Saving…';
+      clearTimeout(updateTimer);
+      updateTimer = setTimeout(updateHash, 250);
+    };
+
+    const copyLink = async () => {
+      try {
+        await navigator.clipboard.writeText(location.href);
+        saveState.textContent = 'Link copied';
+      } catch {
+        saveState.textContent = 'Copy failed';
+      }
+      setTimeout(() => { saveState.textContent = 'Saved to URL'; }, 1200);
+    };
+
+    const downloadBlob = (format) => {
+      const text = pad.value;
+      if (!text) return;
+      const map = {
+        txt: { type: 'text/plain', ext: 'txt', data: text },
+        md: { type: 'text/markdown', ext: 'md', data: text },
+        json: { type: 'application/json', ext: 'json', data: JSON.stringify({ paste: text }) },
+        html: { type: 'text/html', ext: 'html', data: `<pre>${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>` }
+      };
+      const conf = map[format] || map.txt;
+      const blob = new Blob([conf.data], { type: conf.type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `paste.${conf.ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      saveMenu.classList.remove('open');
+      saveState.textContent = `Saved as .${conf.ext}`;
+      setTimeout(() => saveState.textContent = 'Saved to URL', 1200);
+    };
+
+    const init = () => {
+      const initial = decodeFromHash();
+      pad.value = initial;
+      updateHash();
+      pad.focus();
+    };
+
+    pad.addEventListener('input', scheduleSave);
+    copyBtn.addEventListener('click', copyLink);
+    saveBtn.addEventListener('click', () => {
+      saveMenu.classList.toggle('open');
+    });
+    saveMenu.addEventListener('click', (e) => {
+      const format = e.target?.dataset?.format;
+      if (format) downloadBlob(format);
+    });
+    clearBtn.addEventListener('click', () => {
+      pad.value = '';
+      updateHash();
+    });
+
+    window.addEventListener('hashchange', () => {
+      pad.value = decodeFromHash();
+      updateHash();
+    });
+
+    init();
+  </script>
+</body>
+</html>

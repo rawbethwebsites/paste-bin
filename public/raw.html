@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PasteBox raw</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      background: #0b0c10;
+      color: #e5e7eb;
+      font-family: "SFMono-Regular", ui-monospace, SFMono, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      padding: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .error { color: #f87171; }
+  </style>
+</head>
+<body>
+  <pre id="out"></pre>
+  <div id="error" class="error"></div>
+  <script>
+    const out = document.getElementById('out');
+    const errorBox = document.getElementById('error');
+
+    const fromBase64 = (b64) => {
+      const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    };
+
+    const render = () => {
+      const hash = location.hash;
+      if (!hash.startsWith('#p=')) {
+        errorBox.textContent = 'No paste in URL.';
+        return;
+      }
+      try {
+        out.textContent = fromBase64(hash.slice(3));
+      } catch (e) {
+        errorBox.textContent = 'Failed to decode paste.';
+      }
+    };
+
+    window.addEventListener('hashchange', render);
+    render();
+  </script>
+</body>
+</html>

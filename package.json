@@ -1,0 +1,16 @@
+{
+  "name": "save-ass",
+  "version": "1.0.0",
+  "description": "A minimal pastebin service",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "nanoid": "^3.3.4",
+    "mime-types": "^2.1.35",
+    "compression": "^1.7.4"
+  }
+}
