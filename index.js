@@ -61,17 +61,27 @@ ensurePasteDir().catch((error) => {
 // Routes
 app.post('/api/paste', async (req, res) => {
   try {
-    const { content, language } = req.body || {};
+    const { content, language, cipher, iv, encrypted, size } = req.body || {};
 
-    if (typeof content !== 'string' || content.trim().length === 0) {
-      return res.status(400).json({ error: 'Content cannot be empty' });
+    const hasPlain = typeof content === 'string' && content.trim().length > 0;
+    const hasCipher = typeof cipher === 'string' && typeof iv === 'string';
+
+    if (!hasPlain && !hasCipher) {
+      return res
+        .status(400)
+        .json({ error: 'Content cannot be empty' });
     }
 
-    const contentSize = Buffer.byteLength(content, 'utf8');
+    const contentSize = hasPlain
+      ? Buffer.byteLength(content, 'utf8')
+      : typeof size === 'number'
+        ? size
+        : Buffer.byteLength(cipher, 'utf8');
+
     if (contentSize > MAX_PASTE_SIZE) {
       return res
         .status(413)
-        .json({ error: 'Paste too large; max 5MB allowed' });
+        .json({ error: 'Paste too large; max 2MB allowed' });
     }
 
     const safeLanguage =
@@ -81,7 +91,18 @@ app.post('/api/paste', async (req, res) => {
 
     const id = generateId();
     const created_at = new Date().toISOString();
-    const pasteData = { id, content, language: safeLanguage, created_at };
+    const pasteData = {
+      id,
+      created_at,
+      language: safeLanguage,
+      encrypted: Boolean(encrypted) || hasCipher,
+    };
+
+    if (hasPlain) pasteData.content = content;
+    if (hasCipher) {
+      pasteData.cipher = cipher;
+      pasteData.iv = iv;
+    }
 
     const filePath = safePath(`${id}.json`);
     await fs.writeFile(filePath, JSON.stringify(pasteData, null, 2), 'utf8');
@@ -107,6 +128,9 @@ app.get('/api/paste/:id', async (req, res) => {
     return res.json({
       id: paste.id,
       content: paste.content,
+      cipher: paste.cipher,
+      iv: paste.iv,
+      encrypted: Boolean(paste.encrypted),
       language: paste.language || null,
       created_at: paste.created_at,
     });
@@ -134,6 +158,12 @@ app.get('/api/paste/:id/download', async (req, res) => {
     const filePath = safePath(`${id}.json`);
     const raw = await fs.readFile(filePath, 'utf8');
     const paste = JSON.parse(raw);
+
+    if (paste.encrypted) {
+      return res
+        .status(400)
+        .send('Downloads are unavailable for encrypted pastes.');
+    }
 
     let body = paste.content;
     let contentType = 'text/plain';

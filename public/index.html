@@ -118,12 +118,12 @@
 <body>
   <header>
     <strong>PasteBox</strong>
-    <span class="muted">client-side paste · URL carries your data · no server save</span>
+    <span class="muted">client-side encrypted paste · URL carries ciphertext + key</span>
   </header>
 
   <main>
     <div class="panel">
-      <textarea id="pad" spellcheck="false" placeholder="Type or paste here; the URL updates automatically."></textarea>
+      <textarea id="pad" spellcheck="false" placeholder="Type or paste here; the URL updates automatically. Encrypted with the key in your URL."></textarea>
     </div>
   </main>
 
@@ -150,6 +150,9 @@
   </footer>
 
   <script>
+    const API_BASE = '';
+    const INLINE_HASH_LIMIT = 1800; // if exceeded, store ciphertext server-side to shorten URL
+
     const pad = document.getElementById('pad');
     const byteInfo = document.getElementById('byte-info');
     const saveState = document.getElementById('save-state');
@@ -162,24 +165,70 @@
 
     const MAX_BYTES = 2 * 1024 * 1024;
     let updateTimer = null;
+    let currentKey = null; // base64url encoded AES key stored in hash
+    let lastRemote = { id: null, signature: null };
 
-    const toBase64 = (str) => {
-      const bytes = new TextEncoder().encode(str);
+    const base64urlEncode = (buf) => {
+      const bytes = new Uint8Array(buf);
       let binary = '';
-      bytes.forEach(b => { binary += String.fromCharCode(b); });
+      bytes.forEach((b) => { binary += String.fromCharCode(b); });
       return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
     };
 
-    const fromBase64 = (b64) => {
+    const base64urlDecodeToBytes = (b64) => {
       const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
       const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
       const binary = atob(padded);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return new TextDecoder().decode(bytes);
+      return bytes;
     };
 
-    const updateHash = () => {
+    const generateKey = async () => {
+      const key = crypto.getRandomValues(new Uint8Array(32));
+      currentKey = base64urlEncode(key);
+      return key;
+    };
+
+    const importKey = async (keyB64) => {
+      const raw = base64urlDecodeToBytes(keyB64);
+      return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    };
+
+    const encrypt = async (plaintext) => {
+      if (!currentKey) await generateKey();
+      const key = await importKey(currentKey);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encoded = new TextEncoder().encode(plaintext);
+      const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+      return { iv: base64urlEncode(iv), cipher: base64urlEncode(cipherBuf) };
+    };
+
+    const decrypt = async ({ keyB64, iv, cipher }) => {
+      const key = await importKey(keyB64);
+      const ivBytes = base64urlDecodeToBytes(iv);
+      const cipherBytes = base64urlDecodeToBytes(cipher);
+      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, cipherBytes);
+      return new TextDecoder().decode(plainBuf);
+    };
+
+    const storeRemote = async ({ cipher, iv, size }) => {
+      const signature = `${size}:${cipher.slice(0, 32)}`;
+      if (lastRemote.signature === signature && lastRemote.id) {
+        return lastRemote.id;
+      }
+      const res = await fetch(`${API_BASE}/api/paste`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cipher, iv, encrypted: true, size }),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      const data = await res.json();
+      lastRemote = { id: data.id, signature };
+      return data.id;
+    };
+
+    const updateHash = async () => {
       const text = pad.value;
       const size = new Blob([text]).size;
       byteInfo.textContent = `${(size / (1024 * 1024)).toFixed(2)} / 2 MB`;
@@ -189,23 +238,60 @@
         return;
       }
       warn.textContent = '';
-      const encoded = toBase64(text);
-      const newHash = '#p=' + encoded;
-      if (location.hash !== newHash) {
-        history.replaceState(null, '', newHash);
+      try {
+        const { iv, cipher } = await encrypt(text);
+        const inlineHash = `#k=${currentKey}&i=${iv}&c=${cipher}`;
+        if (inlineHash.length <= INLINE_HASH_LIMIT) {
+          if (location.hash !== inlineHash) history.replaceState(null, '', inlineHash);
+          saveState.textContent = 'Encrypted in URL';
+          rawLink.href = './raw.html' + inlineHash;
+          lastRemote = { id: null, signature: null };
+        } else {
+          try {
+            const id = await storeRemote({ cipher, iv, size });
+            const shortHash = `#k=${currentKey}&id=${id}`;
+            if (location.hash !== shortHash) history.replaceState(null, '', shortHash);
+            saveState.textContent = 'Encrypted on server (key in URL)';
+            rawLink.href = './raw.html' + shortHash;
+          } catch {
+            if (location.hash !== inlineHash) history.replaceState(null, '', inlineHash);
+            saveState.textContent = 'URL encrypted (long)';
+            rawLink.href = './raw.html' + inlineHash;
+            warn.textContent = 'Server save failed; using long URL.';
+          }
+        }
+      } catch (e) {
+        warn.textContent = 'Encryption/save failed.';
+        saveState.textContent = 'Not saved';
       }
-      saveState.textContent = 'Saved to URL';
-      rawLink.href = './raw.html' + newHash;
     };
 
-    const decodeFromHash = () => {
+    const fetchRemote = async (id) => {
+      const res = await fetch(`${API_BASE}/api/paste/${id}`);
+      if (!res.ok) throw new Error('Fetch failed');
+      return res.json();
+    };
+
+    const decodeFromHash = async () => {
       const hash = location.hash;
-      if (!hash.startsWith('#p=')) return '';
+      if (!hash) return '';
+      const params = new URLSearchParams(hash.slice(1));
+      const keyB64 = params.get('k');
+      const iv = params.get('i');
+      const cipher = params.get('c');
+      const id = params.get('id');
+      if (!keyB64) return '';
+      currentKey = keyB64;
       try {
-        const encoded = hash.slice(3);
-        return fromBase64(encoded);
+        if (id) {
+          const data = await fetchRemote(id);
+          if (!data.cipher || !data.iv) throw new Error('Missing cipher');
+          return await decrypt({ keyB64, iv: data.iv, cipher: data.cipher });
+        }
+        if (!iv || !cipher) return '';
+        return await decrypt({ keyB64, iv, cipher });
       } catch (e) {
-        warn.textContent = 'Failed to read paste from URL.';
+        warn.textContent = 'Failed to decrypt paste from URL.';
         return '';
       }
     };
@@ -223,7 +309,7 @@
       } catch {
         saveState.textContent = 'Copy failed';
       }
-      setTimeout(() => { saveState.textContent = 'Saved to URL'; }, 1200);
+      setTimeout(() => { saveState.textContent = 'Encrypted in URL'; }, 1200);
     };
 
     const downloadBlob = (format) => {
@@ -247,12 +333,13 @@
       URL.revokeObjectURL(url);
       saveMenu.classList.remove('open');
       saveState.textContent = `Saved as .${conf.ext}`;
-      setTimeout(() => saveState.textContent = 'Saved to URL', 1200);
+      setTimeout(() => saveState.textContent = 'Encrypted in URL', 1200);
     };
 
-    const init = () => {
-      const initial = decodeFromHash();
-      pad.value = initial;
+    const init = async () => {
+      const initial = await decodeFromHash();
+      pad.value = initial || '';
+      if (!currentKey) await generateKey();
       updateHash();
       pad.focus();
     };
@@ -271,8 +358,9 @@
       updateHash();
     });
 
-    window.addEventListener('hashchange', () => {
-      pad.value = decodeFromHash();
+    window.addEventListener('hashchange', async () => {
+      const val = await decodeFromHash();
+      pad.value = val || '';
       updateHash();
     });
 

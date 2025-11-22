@@ -25,25 +25,56 @@
     const out = document.getElementById('out');
     const errorBox = document.getElementById('error');
 
-    const fromBase64 = (b64) => {
+    const base64urlDecodeToBytes = (b64) => {
       const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
       const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
       const binary = atob(padded);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return new TextDecoder().decode(bytes);
+      return bytes;
     };
 
-    const render = () => {
-      const hash = location.hash;
-      if (!hash.startsWith('#p=')) {
+    const importKey = async (keyB64) => {
+      const raw = base64urlDecodeToBytes(keyB64);
+      return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+    };
+
+    const decrypt = async ({ keyB64, iv, cipher }) => {
+      const key = await importKey(keyB64);
+      const ivBytes = base64urlDecodeToBytes(iv);
+      const cipherBytes = base64urlDecodeToBytes(cipher);
+      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, cipherBytes);
+      return new TextDecoder().decode(plainBuf);
+    };
+
+    const fetchRemote = async (id) => {
+      const res = await fetch(`/api/paste/${id}`);
+      if (!res.ok) throw new Error('Fetch failed');
+      return res.json();
+    };
+
+    const render = async () => {
+      const params = new URLSearchParams(location.hash.slice(1));
+      const keyB64 = params.get('k');
+      const iv = params.get('i');
+      const cipher = params.get('c');
+      const id = params.get('id');
+      if (!keyB64) {
         errorBox.textContent = 'No paste in URL.';
         return;
       }
       try {
-        out.textContent = fromBase64(hash.slice(3));
+        if (id) {
+          const data = await fetchRemote(id);
+          if (!data.cipher || !data.iv) throw new Error('Missing cipher');
+          out.textContent = await decrypt({ keyB64, iv: data.iv, cipher: data.cipher });
+        } else if (iv && cipher) {
+          out.textContent = await decrypt({ keyB64, iv, cipher });
+        } else {
+          errorBox.textContent = 'No paste in URL.';
+        }
       } catch (e) {
-        errorBox.textContent = 'Failed to decode paste.';
+        errorBox.textContent = 'Failed to decrypt paste.';
       }
     };
 
